@@ -65,6 +65,16 @@
     }
 )
 
+(define-map best-offers
+    uint
+    {
+        offerer: principal,
+        amount: uint,
+        created-at: uint,
+        active: bool,
+    }
+)
+
 (define-constant ERR-NOT-AUTHORIZED (err u100))
 (define-constant ERR-TOKEN-NOT-FOUND (err u101))
 (define-constant ERR-NOT-OWNER (err u102))
@@ -75,6 +85,8 @@
 (define-constant ERR-INVALID-ROYALTY (err u107))
 (define-constant ERR-SELF-TRANSFER (err u108))
 (define-constant ERR-INVALID-FEE (err u109))
+(define-constant ERR-NO-OFFER (err u110))
+(define-constant ERR-LOWER-OFFER (err u111))
 
 (define-private (is-contract-owner)
     (is-eq tx-sender (var-get contract-owner))
@@ -320,4 +332,122 @@
         is-paused: (var-get is-paused),
         total-tokens: (var-get last-token-id),
     }
+)
+
+(define-public (make-offer
+        (token-id uint)
+        (amount uint)
+    )
+    (let ((cp (as-contract tx-sender)))
+        (begin
+            (asserts! (not (var-get is-paused)) ERR-CONTRACT-PAUSED)
+            (asserts! (> amount u0) ERR-INVALID-PRICE)
+            (asserts!
+                (not (is-eq (some tx-sender) (nft-get-owner? artisan-work token-id)))
+                ERR-SELF-TRANSFER
+            )
+            (match (map-get? best-offers token-id)
+                current (begin
+                    (if (get active current)
+                        (asserts! (> amount (get amount current)) ERR-LOWER-OFFER)
+                        true
+                    )
+                    (try! (stx-transfer? amount tx-sender cp))
+                    (if (get active current)
+                        (as-contract (try! (stx-transfer? (get amount current) tx-sender
+                            (get offerer current)
+                        )))
+                        true
+                    )
+                    (map-set best-offers token-id {
+                        offerer: tx-sender,
+                        amount: amount,
+                        created-at: stacks-block-height,
+                        active: true,
+                    })
+                    (ok true)
+                )
+                (begin
+                    (try! (stx-transfer? amount tx-sender cp))
+                    (map-set best-offers token-id {
+                        offerer: tx-sender,
+                        amount: amount,
+                        created-at: stacks-block-height,
+                        active: true,
+                    })
+                    (ok true)
+                )
+            )
+        )
+    )
+)
+
+(define-public (cancel-offer (token-id uint))
+    (let ((current (unwrap! (map-get? best-offers token-id) ERR-NO-OFFER)))
+        (begin
+            (asserts! (get active current) ERR-NO-OFFER)
+            (asserts! (is-eq tx-sender (get offerer current)) ERR-NOT-AUTHORIZED)
+            (try! (as-contract (stx-transfer? (get amount current) tx-sender (get offerer current))))
+            (map-set best-offers token-id (merge current { active: false }))
+            (ok true)
+        )
+    )
+)
+
+(define-public (accept-offer (token-id uint))
+    (let (
+            (offer (unwrap! (map-get? best-offers token-id) ERR-NO-OFFER))
+            (owner (unwrap! (nft-get-owner? artisan-work token-id) ERR-TOKEN-NOT-FOUND))
+            (price (get amount offer))
+            (offerer (get offerer offer))
+            (platform-fee (calculate-fee price (var-get platform-fee-percentage)))
+            (royalty-info (default-to {
+                creator: owner,
+                royalty-percentage: u0,
+            }
+                (map-get? token-royalties token-id)
+            ))
+            (royalty-fee (calculate-fee price (get royalty-percentage royalty-info)))
+            (seller-amount (- (- price platform-fee) royalty-fee))
+        )
+        (begin
+            (asserts! (not (var-get is-paused)) ERR-CONTRACT-PAUSED)
+            (asserts! (is-eq (some owner) (nft-get-owner? artisan-work token-id))
+                ERR-NOT-OWNER
+            )
+            (asserts! (get active offer) ERR-NO-OFFER)
+            (asserts! (is-eq tx-sender owner) ERR-NOT-AUTHORIZED)
+            (if (> platform-fee u0)
+                (try! (as-contract (stx-transfer? platform-fee tx-sender (var-get contract-owner))))
+                true
+            )
+            (if (and (> royalty-fee u0) (not (is-eq owner (get creator royalty-info))))
+                (try! (as-contract (stx-transfer? royalty-fee tx-sender (get creator royalty-info))))
+                true
+            )
+            (try! (as-contract (stx-transfer? seller-amount tx-sender owner)))
+            (try! (nft-transfer? artisan-work token-id owner offerer))
+            (map-set best-offers token-id (merge offer { active: false }))
+            (match (map-get? market-listings token-id)
+                listing (if (get active listing)
+                    (map-set market-listings token-id
+                        (merge listing { active: false })
+                    )
+                    true
+                )
+                true
+            )
+            (match (map-get? artisan-profiles owner)
+                profile (map-set artisan-profiles owner
+                    (merge profile { total-sales: (+ (get total-sales profile) u1) })
+                )
+                true
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-read-only (get-best-offer (token-id uint))
+    (map-get? best-offers token-id)
 )
