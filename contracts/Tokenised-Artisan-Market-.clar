@@ -451,3 +451,83 @@
 (define-read-only (get-best-offer (token-id uint))
     (map-get? best-offers token-id)
 )
+
+(define-public (batch-mint-artworks (artworks (list
+    10
+    {
+        name: (string-ascii 64),
+        description: (string-ascii 256),
+        image-uri: (string-ascii 256),
+        category: (string-ascii 32),
+        royalty-percentage: uint,
+    }
+)))
+    (begin
+        (asserts! (not (var-get is-paused)) ERR-CONTRACT-PAUSED)
+        (ok (map batch-mint-single artworks))
+    )
+)
+
+(define-private (batch-mint-single (artwork {
+    name: (string-ascii 64),
+    description: (string-ascii 256),
+    image-uri: (string-ascii 256),
+    category: (string-ascii 32),
+    royalty-percentage: uint,
+}))
+    (let ((token-id (+ (var-get last-token-id) u1)))
+        (if (<= (get royalty-percentage artwork) u2000)
+            (begin
+                (unwrap-panic (nft-mint? artisan-work token-id tx-sender))
+                (map-set token-metadata token-id {
+                    name: (get name artwork),
+                    description: (get description artwork),
+                    image-uri: (get image-uri artwork),
+                    creator: tx-sender,
+                    created-at: stacks-block-height,
+                    category: (get category artwork),
+                })
+                (map-set token-royalties token-id {
+                    creator: tx-sender,
+                    royalty-percentage: (get royalty-percentage artwork),
+                })
+                (var-set last-token-id token-id)
+                token-id
+            )
+            u0
+        )
+    )
+)
+
+(define-public (batch-list-for-sale (listings (list 10 {
+    token-id: uint,
+    price: uint,
+})))
+    (begin
+        (asserts! (not (var-get is-paused)) ERR-CONTRACT-PAUSED)
+        (ok (map batch-list-single listings))
+    )
+)
+
+(define-private (batch-list-single (listing-info {
+    token-id: uint,
+    price: uint,
+}))
+    (let (
+            (token-id (get token-id listing-info))
+            (price (get price listing-info))
+        )
+        (if (and (> price u0) (is-eq (some tx-sender) (nft-get-owner? artisan-work token-id)))
+            (begin
+                (map-set market-listings token-id {
+                    seller: tx-sender,
+                    price: price,
+                    listed-at: stacks-block-height,
+                    active: true,
+                })
+                true
+            )
+            false
+        )
+    )
+)
